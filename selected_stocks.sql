@@ -1,0 +1,1 @@
+INSERT INTO `selected_stocks` (`id`, `report_date`, `stock_code`, `stock_name`, `buy_price`, `sell_price`, `buy_date`, `created_at`) VALUES (3, '2026-01-03', '000001', '平安银行', 10.5, 12.8, '2026-01-03', '2026-01-03 10:18:25');
