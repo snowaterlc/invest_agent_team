@@ -1,6 +1,6 @@
 # Invest Agent 团队项目
 
-本项目是由 [Invest Agent 团队](https://gitee.com/snowater/invest_agent_team) 开发的开源项目，旨在提供与投资代理相关的功能和服务。
+本项目是由 [snowater](https://gitee.com/snowater/invest_agent_team) 开发的开源项目，旨在提供与投资代理相关的功能和服务。
 
 ## 项目概述
 
@@ -14,6 +14,11 @@
 - **投资代理服务**：核心的投资代理业务逻辑实现。
 - **多场景支持**：适用于多种投资场景的代理服务。
 - **可扩展性**：模块化设计，便于后续功能扩展。
+## 项目功能
+-**next_trading_day_invest_report**：使用掘金量化api和akshare接口。功能基本完善。需要大模型支持。
+-**next_trading_day_invest_report_mysql**：使用掘金量化api和akshare接口。功能基本完善。需要大模型支持。可以把生成的报告存到mysql数据库中。
+-**invest_team_agent_deepseek**:是大盘股的投资分析，不是很完善，不过也能生成投资报告。
+-**invest_team_agent_deepseek_lt**:是小盘股的投资分析，不是很完善，不过也能生成投资报告。
 
 ## 安装与使用
 
