@@ -1,0 +1,36 @@
+version: '3.8'
+services:
+  ai-invest-agent:
+    build: .
+    container_name: ai-invest-agent
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - TUSHARE_TOKEN=${TUSHARE_TOKEN}
+    volumes:
+      - ./cache:/app/cache
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:5.0
+    container_name: invest-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=invest_user
+      - MONGO_INITDB_ROOT_PASSWORD=invest_pass
+    restart: unless-stopped
+
+  vnpy-trader:
+    image: vnpy/vnpy:latest
+    container_name: vnpy-trader
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./vnpy_data:/vnpy_data
+    depends_on:
+      - mongodb
+    restart: unless-stopped

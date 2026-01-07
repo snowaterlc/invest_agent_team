@@ -1,0 +1,11 @@
+crewai
+crewai-tools
+langchain
+langchain-openai
+akshare
+gm
+python-dotenv
+pandas
+numpy
+pymysql
+sqlalchemy
