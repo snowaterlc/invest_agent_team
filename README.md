@@ -23,9 +23,19 @@
 Windows PowerShell:
 ```
 python -m venv venv
-.
-.v	ings activate
+.\\venv\\Scripts\\Activate.ps1
 ```
+注意：在某些系统中执行策略可能阻止脚本运行。若遇到权限问题，请临时放宽策略后再激活：
+```
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+```
+
+Linux/macOS Bash:
+```
+python3 -m venv venv
+source venv/bin/activate
+```
+
 注意：以上激活命令需要与实际路径匹配，推荐直接在命令中使用 `.
 \venv\Scripts\activate`。
 
@@ -61,13 +71,9 @@ APP_PORT=8000
 ```
 
 ### 2.4 运行验证
-进入项目根目录后，尝试启动入口脚本以确认环境就绪。常见入口脚本示例：`main.py`、`app.py`、`server.py` 等。
+进入项目根目录后，尝试启动入口脚本以确认环境就绪。
 ```
-python main.py
-```
-或
-```
-uvicorn server:app --reload
+python next_trading_day_invest_report_mysql.py
 ```
 若入口不同，请以实际入口为准。跑起来后检查控制台输出与日志。
 
@@ -78,8 +84,7 @@ uvicorn server:app --reload
 ## 4. 运行入口定位
 - 若仓库中存在 `if __name__ == "__main__":` 的入口块，通常对应命令行启动脚本。
 - 常见入口点：
-  - main.py → `python main.py`
-  - app.py 或 wsgi 应用 → 使用相应的 Web 服务器启动，如 `uvicorn app:app`、`gunicorn app:app` 等
+  - main.py → `python next_trading_day_invest_report_mysql.py`
 - 若不确定入口，请搜索项目中的入口模式：
   - 使用文本搜索查找 `if __name__ ==` 或 `def main(` 等关键词。
 
@@ -113,14 +118,13 @@ pytest
 ### 10.1 安装
 请将实际的 Python 包名替换为你们使用的包名，下面给出通用示例：
 ```
-pip install juejin-quant
+python.exe -m pip install gm -i https://mirrors.aliyun.com/pypi/simple/ -U
 ```
-若仓库中依赖的包名不同，请改为实际包名，例如：`pip install juejin_quant` 或 `pip install juejin-quant-api`。
 
 ### 10.2 获取 Token
-1) 访问掘金量化官方网站并登录账号。
-2) 进入“开发者中心”或“API 管理/应用管理”。
-3) 点击“创建应用”或“生成 API Key/Token”。
+1) 登陆掘金量化客户端。
+2) 进入系统设置。
+3) 找到秘钥管理（Tokens）。
 4) 复制生成的 Token，妥善保存。
 5) 将 Token 配置到环境变量中，例如在 .env：
 ```
@@ -132,20 +136,12 @@ import os
 token = os.getenv('JUEJIN_TOKEN')
 ```
 
-### 10.3 使用示例
-```python
-from juejin_quant import Client
-client = Client(token=os.getenv('JUEJIN_TOKEN'))
-# 根据实际包的 API 调用示例进行接入
-```
+### 10.3 使用
+- 运行项目必须保证掘金量化客户端已登录，仿真股票账户已连接。
 
-### 10.4 安全与运维
-- 不要将 Token 上传到版本控制系统。
-- 如有 IP 白名单、权限范围，请按照平台要求进行限制。
-- 定期轮换 Token，更新后重启应用。
-
-### 10.5 常见问题
+### 10.4 常见问题
 - 安装失败：检查 Python 版本、网络、以及代理设置。
-- Token 无效：在开发者中心重新生成新 Token 并更新环境变量。
+- 掘金量化相关api 调用失败：检查 Token 是否正确配置，以及账户是否有足够权限。
+- 检查掘金量化api是否最新版本。
 
 如需，我可以把实际包名替换为你仓库中实际使用的包名，并补充更具体的调用示例。
