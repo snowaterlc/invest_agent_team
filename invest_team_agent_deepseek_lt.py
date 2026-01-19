@@ -29,8 +29,17 @@ gm_api_token = os.getenv("GM_API_TOKEN")
 if gm_api_token:
     set_token(gm_api_token)
 try:
-    NEXT_TRADING_DAY = get_next_trading_date(exchange="SHSE", date=datetime.now())
-except:
+    # 使用新版API获取下个交易日
+    trading_dates = get_next_n_trading_dates(
+        date=datetime.now().strftime("%Y-%m-%d"), n=1, exchange="SHSE"
+    )
+    NEXT_TRADING_DAY = (
+        trading_dates[0]
+        if trading_dates
+        else (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    )
+except Exception as e:
+    print(f"获取交易日历失败: {e}")
     NEXT_TRADING_DAY = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
@@ -100,12 +109,13 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         # 股票列表获取
         if ts_code is None:
             try:
-                stock_df = get_instruments(
-                    exchanges="SHSE, SZSE",
-                    sec_types=SEC_TYPE_STOCK,
+                # 使用新版API获取股票列表
+                stock_df = get_symbols(
+                    sec_type1=1010,  # A股
+                    sec_type2=101001,  # 主板A股
+                    exchanges="SHSE,SZSE",
                     skip_suspended=True,
                     skip_st=True,
-                    fields="symbol,sec_name,exchange",
                     df=True,
                 )
 
@@ -116,7 +126,14 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 stock_df = stock_df[
                     (
                         ~stock_df["symbol"].str.startswith(
-                            ("SZSE.3", "SHSE.688", "SZSE.8", "SHSE.9", "SHSE.4", "SZSE.2")
+                            (
+                                "SZSE.3",
+                                "SHSE.688",
+                                "SZSE.8",
+                                "SHSE.9",
+                                "SHSE.4",
+                                "SZSE.2",
+                            )
                         )
                     )
                 ].head(10)
@@ -156,45 +173,51 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         # 基本面数据
         gm_symbol = set_em_symble(ts_code)
         try:
-            balance_data = stk_get_fundamentals_balance(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            # 使用新版API获取基本面数据
+            balance_data = stk_get_fundamentals_balance_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="ttl_ast,mny_cptl,ttl_cur_ast,ttl_ncur_ast,ttl_liab,ttl_eqy",
             )
-            income_data = stk_get_fundamentals_income(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            income_data = stk_get_fundamentals_income_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="inc_oper,net_prof,oper_prof,ttl_prof,biz_tax_sur,exp_sell,exp_adm,exp_rd,exp_fin",
             )
-            indicator_data = stk_get_finance_deriv(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            indicator_data = stk_get_finance_deriv_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="roe,roe_weight,roe_avg,roe_cut",
             )
 
-            prime_data = stk_get_finance_prime(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            prime_data = stk_get_finance_prime_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="eps_basic,eps_dil,bps_pcom_ps,net_prof_pcom_yoy",
             )
 
-            valuation_data = stk_get_daily_valuation(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            valuation_data = stk_get_daily_valuation_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="pb_lyr,pe_ttm,ps_ttm,pcf_ttm_oper,dy_ttm",
             )
 
             # 合并数据
-            balance_has_data = isinstance(balance_data, pd.DataFrame) and not balance_data.empty
-            income_has_data = isinstance(income_data, pd.DataFrame) and not income_data.empty
-            indicator_has_data = isinstance(indicator_data, pd.DataFrame) and not indicator_data.empty
-            prime_has_data = isinstance(prime_data, pd.DataFrame) and not prime_data.empty
-            valuation_has_data =  isinstance(valuation_data, pd.DataFrame) and not valuation_data.empty
+            balance_has_data = (
+                isinstance(balance_data, pd.DataFrame) and not balance_data.empty
+            )
+            income_has_data = (
+                isinstance(income_data, pd.DataFrame) and not income_data.empty
+            )
+            indicator_has_data = (
+                isinstance(indicator_data, pd.DataFrame) and not indicator_data.empty
+            )
+            prime_has_data = (
+                isinstance(prime_data, pd.DataFrame) and not prime_data.empty
+            )
+            valuation_has_data = (
+                isinstance(valuation_data, pd.DataFrame) and not valuation_data.empty
+            )
 
             if (
                 balance_has_data
@@ -303,7 +326,10 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         if "roe_weight" in indicator_data.columns
                         else None
                     )
-                    fina_data_dict["net_prof_pcom_yoy"] = (
+
+                # 从财务主要指标获取净利润增长率
+                if isinstance(prime_data, pd.DataFrame) and not prime_data.empty:
+                    fina_data_dict["profit_growth"] = (
                         prime_data["net_prof_pcom_yoy"].iloc[0]
                         if "net_prof_pcom_yoy" in prime_data.columns
                         else None
@@ -339,6 +365,21 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         if "pcf_ttm_oper" in valuation_data.columns
                         else None
                     )
+                    # 流通市值 (单位: 亿元)
+                    if "neg_mkt_cap" in valuation_data.columns:
+                        fina_data_dict["circulating_market_value"] = (
+                            valuation_data["neg_mkt_cap"].iloc[0] / 1e8
+                            if valuation_data["neg_mkt_cap"].iloc[0] is not None
+                            else None
+                        )
+                    elif "mkt_cap" in valuation_data.columns:
+                        fina_data_dict["circulating_market_value"] = (
+                            valuation_data["mkt_cap"].iloc[0] / 1e8
+                            if valuation_data["mkt_cap"].iloc[0] is not None
+                            else None
+                        )
+                    else:
+                        fina_data_dict["circulating_market_value"] = None
                 fina_data = pd.DataFrame([fina_data_dict])
             else:
                 print(f"掘金量化基本面数据获取失败，回退到akshare: {ts_code}")
@@ -435,22 +476,31 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
 
         # 技术面数据（新增下个交易日关键信号）
         try:
-            daily = history_n(symbol=gm_symbol, frequency='1d', count=60, adjust=ADJUST_PREV,
-                                  end_time=datetime.now().strftime("%Y-%m-%d"),
-                              fields='open,high,low,close,volume', df=True)
-            daily = daily.rename(columns={"eob": "date"})
+            # 使用新版API获取历史数据
+            daily = get_history_symbol(
+                symbols=gm_symbol,
+                start_date=(datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),
+                end_date=datetime.now().strftime("%Y-%m-%d"),
+                df=True,
+            )
+            daily = daily.rename(columns={"trade_date": "date"})
 
             if not isinstance(daily, pd.DataFrame) or daily.empty:
                 raise ValueError(f"掘金量化无{ts_code}技术面数据")
 
             # 获取最新价格
-            current_data = gm_api.current(gm_symbol, fields="price")
+            current_data = current(symbols=gm_symbol, fields="price")
             if isinstance(current_data, pd.DataFrame) and not current_data.empty:
-                current_price = current_data[0]['price']
+                current_price = current_data[0]["price"]
             else:
                 # 如果实时价格获取失败，使用历史数据的最新收盘价
-                current_price = daily["close"].iloc[-1] if not daily.empty and "close" in daily.columns and not daily["close"].isna().iloc[-1] else None
-
+                current_price = (
+                    daily["close"].iloc[-1]
+                    if not daily.empty
+                    and "close" in daily.columns
+                    and not daily["close"].isna().iloc[-1]
+                    else None
+                )
 
         except:
             symbol_clean = ts_code.split(".")[1]
@@ -476,14 +526,26 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 )
 
                 # 获取最新的akshare数据作为当前价格
-                current_price = daily["close"].iloc[-1] if not daily.empty and "close" in daily.columns and not daily["close"].isna().iloc[-1] else None
+                current_price = (
+                    daily["close"].iloc[-1]
+                    if not daily.empty
+                    and "close" in daily.columns
+                    and not daily["close"].isna().iloc[-1]
+                    else None
+                )
 
             except:
                 raise ValueError(f"技术面数据获取失败")
 
         # 确保技术数据包含当前价格
         if "current_price" not in locals():
-            current_price = daily["close"].iloc[-1] if not daily.empty and "close" in daily.columns and not daily["close"].isna().iloc[-1] else None
+            current_price = (
+                daily["close"].iloc[-1]
+                if not daily.empty
+                and "close" in daily.columns
+                and not daily["close"].isna().iloc[-1]
+                else None
+            )
 
         # 精简数据
         if limit_data and len(daily) > 5:
@@ -493,7 +555,7 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         daily["close"] = pd.to_numeric(daily["close"], errors="coerce")
         daily["ma5"] = daily["close"].rolling(5, min_periods=1).mean()
         daily["ma20"] = daily["close"].rolling(20, min_periods=1).mean()
-        
+
         # 仅在数据有效时进行计算
         if daily["close"].isna().all():
             daily["ma5"] = pd.Series([None] * len(daily), dtype=float)
@@ -516,21 +578,46 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         latest = daily.iloc[-1] if not daily.empty else None
         next_trading_signal = {
             "current_price": current_price,
-            "support_price": latest["low"] if latest is not None and "low" in latest and pd.notna(latest["low"]) else None,
-            "resistance_price": latest["high"] if latest is not None and "high" in latest and pd.notna(latest["high"]) else None,
+            "support_price": latest["low"]
+            if latest is not None and "low" in latest and pd.notna(latest["low"])
+            else None,
+            "resistance_price": latest["high"]
+            if latest is not None and "high" in latest and pd.notna(latest["high"])
+            else None,
             "ma20_position": "above"
-            if latest is not None and "close" in latest and "ma20" in latest and pd.notna(latest["close"]) and pd.notna(latest["ma20"]) and latest["close"] > latest["ma20"]
-            else "below" if latest is not None and "close" in latest and "ma20" in latest and pd.notna(latest["close"]) and pd.notna(latest["ma20"])
+            if latest is not None
+            and "close" in latest
+            and "ma20" in latest
+            and pd.notna(latest["close"])
+            and pd.notna(latest["ma20"])
+            and latest["close"] > latest["ma20"]
+            else "below"
+            if latest is not None
+            and "close" in latest
+            and "ma20" in latest
+            and pd.notna(latest["close"])
+            and pd.notna(latest["ma20"])
             else None,
             "volume_trend": "up"
-            if latest is not None and "volume" in latest and len(daily) >= 2 and daily.iloc[-2]["volume"] is not None
-            and pd.notna(latest["volume"]) and pd.notna(daily.iloc[-2]["volume"])
+            if latest is not None
+            and "volume" in latest
+            and len(daily) >= 2
+            and daily.iloc[-2]["volume"] is not None
+            and pd.notna(latest["volume"])
+            and pd.notna(daily.iloc[-2]["volume"])
             and latest["volume"] > daily.iloc[-2]["volume"]
-            else "down" if latest is not None and "volume" in latest and len(daily) >= 2 and daily.iloc[-2]["volume"] is not None
-            and pd.notna(latest["volume"]) and pd.notna(daily.iloc[-2]["volume"])
+            else "down"
+            if latest is not None
+            and "volume" in latest
+            and len(daily) >= 2
+            and daily.iloc[-2]["volume"] is not None
+            and pd.notna(latest["volume"])
+            and pd.notna(daily.iloc[-2]["volume"])
             else None,
             "rsi": daily["rsi"].iloc[-1]
-            if "rsi" in daily.columns and not daily.empty and not pd.isna(daily["rsi"].iloc[-1])
+            if "rsi" in daily.columns
+            and not daily.empty
+            and not pd.isna(daily["rsi"].iloc[-1])
             else None,
         }
 
@@ -538,19 +625,28 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         stock_name = None
         try:
             # 尝试从掘金API获取名称
-            stock_info = get_instruments(symbol=gm_symbol, fields="symbol,name")
-            if len(stock_info) > 0 and "name" in stock_info[0]:
-                stock_name = stock_info[0]["name"]
+            stock_info = get_symbol_infos(sec_type1=1010, symbols=gm_symbol)
+            if len(stock_info) > 0 and "sec_name" in stock_info[0]:
+                stock_name = stock_info[0]["sec_name"]
         except:
             # 如果掘金API失败，使用akshare获取
             try:
                 symbol_clean = ts_code.split(".")[0]
                 stock_info = ak.stock_info_a_code_name()
                 # akshare返回的列名可能是index和name，需要调整
-                if isinstance(stock_info, pd.DataFrame) and "code" in stock_info.columns:
+                if (
+                    isinstance(stock_info, pd.DataFrame)
+                    and "code" in stock_info.columns
+                ):
                     filtered = stock_info[stock_info["code"] == symbol_clean]
-                    stock_name = filtered["name"].iloc[0] if not filtered.empty else None
-                elif isinstance(stock_info, pd.DataFrame) and 0 in stock_info.columns and 1 in stock_info.columns:
+                    stock_name = (
+                        filtered["name"].iloc[0] if not filtered.empty else None
+                    )
+                elif (
+                    isinstance(stock_info, pd.DataFrame)
+                    and 0 in stock_info.columns
+                    and 1 in stock_info.columns
+                ):
                     filtered = stock_info[stock_info.iloc[:, 0] == symbol_clean]
                     stock_name = filtered.iloc[0, 1] if not filtered.empty else None
                 else:
@@ -565,7 +661,9 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
             "fundamental": fina_data.head(1).to_dict("records")[0]
             if isinstance(fina_data, pd.DataFrame) and not fina_data.empty
             else {},
-            "technical": daily.to_dict("records") if isinstance(daily, pd.DataFrame) and not daily.empty else [],
+            "technical": daily.to_dict("records")
+            if isinstance(daily, pd.DataFrame) and not daily.empty
+            else [],
             "next_trading_day": {
                 "date": NEXT_TRADING_DAY,
                 "key_signal": next_trading_signal,
@@ -639,7 +737,9 @@ def compliance_check(stock_list: list, analysis_report: str) -> dict:
     return {
         "overall_compliant": total_pass == len(compliance_rules),
         "checks": compliance_rules,
-        "suggestions": ["修正违规内容", "补充风险提示"] if total_pass < len(compliance_rules) else ["合规"]
+        "suggestions": ["修正违规内容", "补充风险提示"]
+        if total_pass < len(compliance_rules)
+        else ["合规"],
     }
 
 
@@ -647,15 +747,20 @@ def compliance_check(stock_list: list, analysis_report: str) -> dict:
 def web_plagiarism_check(report_content: str) -> dict:
     """网上查重工具"""
     try:
-        sentences = [s.strip() for s in report_content.split("\n") if len(s.strip()) > 20][:3]
-        if not sentences: return {"plagiarism_score": 0, "is_plagiarized": False}
+        sentences = [
+            s.strip() for s in report_content.split("\n") if len(s.strip()) > 20
+        ][:3]
+        if not sentences:
+            return {"plagiarism_score": 0, "is_plagiarized": False}
 
         matches = 0
         for s in sentences:
             try:
                 resp = requests.get(f"https://www.baidu.com/s?wd={quote(s)}", timeout=5)
-                if s in resp.text: matches += 1
-            except: pass
+                if s in resp.text:
+                    matches += 1
+            except:
+                pass
 
         score = (matches / len(sentences)) * 100
         return {"plagiarism_score": score, "is_plagiarized": score > 30}
@@ -669,82 +774,108 @@ agents = [
         role="小盘股基本面分析师",
         goal=f"筛选{NEXT_TRADING_DAY}可买入的小盘股（流通市值<100亿、ROE>12%、净利润增长率>15%、负债率<60%）",
         backstory="擅长挖掘具有高成长潜力的小市值标的，注重财务质量和护城河。",
-        verbose=True, llm=llm, tools=[get_a_share_data], max_iter=10
+        verbose=True,
+        llm=llm,
+        tools=[get_a_share_data],
+        max_iter=10,
     ),
     Agent(
         role="股性活跃度分析师",
         goal=f"筛选{NEXT_TRADING_DAY}交易活跃的股票（换手率>3%、近期有涨停、振幅大）",
         backstory="追踪市场热点和资金流向，擅长识别短期爆发力强的牛股。",
-        verbose=True, llm=llm, tools=[get_a_share_data], max_iter=10
+        verbose=True,
+        llm=llm,
+        tools=[get_a_share_data],
+        max_iter=10,
     ),
     Agent(
         role="趋势技术分析师",
         goal=f"分析{NEXT_TRADING_DAY}技术面信号（MA20、RSI、支撑压力位），给出买卖建议",
         backstory="精通K线形态和各种技术指标，精准捕捉买卖点。",
-        verbose=True, llm=llm, tools=[get_a_share_data], max_iter=10
+        verbose=True,
+        llm=llm,
+        tools=[get_a_share_data],
+        max_iter=10,
     ),
     Agent(
         role="小盘股投资风控官",
         goal=f"审核投资组合的风控指标（单票≤10%、总仓位≤80%、止损7%）",
         backstory="纪律严明，始终将风险控制放在首位，确保资产安全。",
-        verbose=True, llm=llm, tools=[get_a_share_data], max_iter=10
+        verbose=True,
+        llm=llm,
+        tools=[get_a_share_data],
+        max_iter=10,
     ),
     Agent(
         role="合规审查官",
         goal=f"检查报告的合规性，剔除ST和误导性表述",
         backstory="熟悉法律法规，确保所有建议符合行业规范。",
-        verbose=True, llm=llm, tools=[compliance_check], max_iter=5
+        verbose=True,
+        llm=llm,
+        tools=[compliance_check],
+        max_iter=5,
     ),
     Agent(
         role="内容原创审核员",
         goal="确保报告内容的原创性，防止抄袭",
         backstory="严格审核每一份文稿，维护分析工作的独立性。",
-        verbose=True, llm=llm, tools=[web_plagiarism_check], max_iter=5
+        verbose=True,
+        llm=llm,
+        tools=[web_plagiarism_check],
+        max_iter=5,
     ),
     Agent(
         role="小盘股投资顾问",
         goal=f"汇总分析，生成最终报告",
         backstory="整合各方观点，给出简洁明了的行动指南。",
-        verbose=True, llm=llm, allow_delegation=True, max_iter=10
+        verbose=True,
+        llm=llm,
+        allow_delegation=True,
+        max_iter=10,
     ),
 ]
 
 tasks = [
     Task(
         description=f"基于基本面筛选10只以内的优质小盘股。输出：ts_code, name, roe, profit_growth, debt_ratio, circulating_market_value。",
-        agent=agents[0], expected_output="基本面优质股票列表"
+        agent=agents[0],
+        expected_output="基本面优质股票列表",
     ),
     Task(
         description=f"在基本面列表中筛选活跃度高的股票。输出：ts_code, name, volume_trend, has_limit_up_recently。",
-        agent=agents[1], expected_output="高活跃度股票列表"
+        agent=agents[1],
+        expected_output="高活跃度股票列表",
     ),
     Task(
         description=f"进行技术分析，评估买入点。输出：current_price, ma20_position, support_price, resistance_price。",
-        agent=agents[2], expected_output="技术面分析报告"
+        agent=agents[2],
+        expected_output="技术面分析报告",
     ),
     Task(
         description="审核风控指标，给出仓位建议和止损位。",
-        agent=agents[3], expected_output="风控审核意见"
+        agent=agents[3],
+        expected_output="风控审核意见",
     ),
     Task(
         description="合规审查，确保无误导表述。",
-        agent=agents[4], expected_output="合规报告"
+        agent=agents[4],
+        expected_output="合规报告",
     ),
-    Task(
-        description="原创性审核。",
-        agent=agents[5], expected_output="查重报告"
-    ),
+    Task(description="原创性审核。", agent=agents[5], expected_output="查重报告"),
     Task(
         description=f"生成最终报告。包含：核心标的（≤3只）、仓位、买入价、止损价。要求合规、原创、简洁（500字内）。",
-        agent=agents[6], expected_output="最终投资报告"
+        agent=agents[6],
+        expected_output="最终投资报告",
     ),
 ]
 
 if __name__ == "__main__":
     try:
-        crew = Crew(agents=agents, tasks=tasks, process=Process.sequential, verbose=True)
+        crew = Crew(
+            agents=agents, tasks=tasks, process=Process.sequential, verbose=True
+        )
         result = crew.kickoff()
-        print("\n" + "="*50 + "\n最终决策报告\n" + "="*50)
+        print("\n" + "=" * 50 + "\n最终决策报告\n" + "=" * 50)
         print(result)
 
         path = f"./cache/SmallCapReport_{NEXT_TRADING_DAY}.md"

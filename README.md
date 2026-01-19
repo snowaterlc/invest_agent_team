@@ -116,10 +116,12 @@ pytest
 
 ## 10. 掘金量化安装与 Token 获取
 ### 10.1 安装
-请将实际的 Python 包名替换为你们使用的包名，下面给出通用示例：
+请确保安装掘金量化的最新SDK版本：
 ```
 python.exe -m pip install gm -i https://mirrors.aliyun.com/pypi/simple/ -U
 ```
+
+**注意：** 掘金量化已于2024年9月30日正式下线老版数据API，请确保安装 gm>=3.0.148 版本以使用新版API。
 
 ### 10.2 获取 Token
 1) 登陆掘金量化客户端。
@@ -128,20 +130,35 @@ python.exe -m pip install gm -i https://mirrors.aliyun.com/pypi/simple/ -U
 4) 复制生成的 Token，妥善保存。
 5) 将 Token 配置到环境变量中，例如在 .env：
 ```
-JUEJIN_TOKEN=your_token_here
+GM_API_TOKEN=your_token_here
 ```
 6) 在代码中读取 Token，例如：
 ```python
 import os
-token = os.getenv('JUEJIN_TOKEN')
+token = os.getenv('GM_API_TOKEN')
 ```
 
-### 10.3 使用
+### 10.3 新版API说明
+掘金量化已更新至新版API，主要变更：
+
+| 旧API（已下线） | 新API |
+|---|---|
+| `get_instruments` | `get_symbols` |
+| `get_next_trading_date` | `get_next_n_trading_dates` |
+| `history_n` | `get_history_symbol` |
+| `stk_get_fundamentals_balance` | `stk_get_fundamentals_balance_pt` |
+| `stk_get_fundamentals_income` | `stk_get_fundamentals_income_pt` |
+| `stk_get_finance_deriv` | `stk_get_finance_deriv_pt` |
+| `stk_get_finance_prime` | `stk_get_finance_prime_pt` |
+| `stk_get_daily_valuation` | `stk_get_daily_valuation_pt` |
+
+### 10.4 使用
 - 运行项目必须保证掘金量化客户端已登录，仿真股票账户已连接。
+- 确保使用新版API调用方式。
 
-### 10.4 常见问题
+### 10.5 常见问题
 - 安装失败：检查 Python 版本、网络、以及代理设置。
-- 掘金量化相关api 调用失败：检查 Token 是否正确配置，以及账户是否有足够权限。
-- 检查掘金量化api是否最新版本。
+- 掘金量化相关API调用失败：检查 Token 是否正确配置，以及账户是否有足够权限。
+- 确保安装了最新版本的 gm SDK（>=3.0.148）。
 
-如需，我可以把实际包名替换为你仓库中实际使用的包名，并补充更具体的调用示例。
+如需更详细的API使用示例，请参考掘金量化官方文档：https://www.myquant.cn/docs2/sdk/python/

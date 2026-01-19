@@ -18,9 +18,19 @@ from gm.api import history, get_instruments
 from langchain_openai import ChatOpenAI
 from openai import APITimeoutError, APIConnectionError
 from datetime import datetime, timedelta
+
 # 添加MySQL相关导入
 import sqlalchemy
-from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Date
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Float,
+    Text,
+    DateTime,
+    Date,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -33,7 +43,19 @@ os.makedirs("./cache", exist_ok=True)
 gm_api_token = os.getenv("GM_API_TOKEN")
 if gm_api_token:
     set_token(gm_api_token)
-NEXT_TRADING_DAY = get_next_trading_date(exchange="SHSE", date=datetime.now())
+try:
+    # 使用新版API获取下个交易日
+    trading_dates = get_next_n_trading_dates(
+        date=datetime.now().strftime("%Y-%m-%d"), n=1, exchange="SHSE"
+    )
+    NEXT_TRADING_DAY = (
+        trading_dates[0]
+        if trading_dates
+        else (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    )
+except Exception as e:
+    print(f"获取交易日历失败: {e}")
+    NEXT_TRADING_DAY = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # LLM配置（DeepSeek兼容）
@@ -97,13 +119,13 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         # 股票列表获取
         if ts_code is None:
             try:
-                # 通过get_instruments获取所有的上市股票代码，剔除停牌股和st股
-                stock_df = get_instruments(
-                    exchanges="SHSE, SZSE",
-                    sec_types=SEC_TYPE_STOCK,
+                # 使用新版API获取股票列表
+                stock_df = get_symbols(
+                    sec_type1=1010,  # A股
+                    sec_type2=101001,  # 主板A股
+                    exchanges="SHSE,SZSE",
                     skip_suspended=True,
                     skip_st=True,
-                    fields="symbol,sec_name,exchange",
                     df=True,
                 )
 
@@ -113,7 +135,14 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 stock_df = stock_df[
                     (
                         ~stock_df["symbol"].str.startswith(
-                            ("SZSE.3", "SHSE.688", "SZSE.8", "SHSE.9", "SHSE.4", "SZSE.2")
+                            (
+                                "SZSE.3",
+                                "SHSE.688",
+                                "SZSE.8",
+                                "SHSE.9",
+                                "SHSE.4",
+                                "SZSE.2",
+                            )
                         )
                     )
                 ].head(10)
@@ -156,45 +185,51 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         # 基本面数据
         gm_symbol = set_em_symble(ts_code)
         try:
-            balance_data = stk_get_fundamentals_balance(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            # 使用新版API获取基本面数据
+            balance_data = stk_get_fundamentals_balance_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="ttl_ast,mny_cptl,ttl_cur_ast,ttl_ncur_ast,ttl_liab,ttl_eqy",
             )
-            income_data = stk_get_fundamentals_income(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            income_data = stk_get_fundamentals_income_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="inc_oper,net_prof,oper_prof,ttl_prof,biz_tax_sur,exp_sell,exp_adm,exp_rd,exp_fin",
             )
-            indicator_data = stk_get_finance_deriv(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            indicator_data = stk_get_finance_deriv_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="roe,roe_weight,roe_avg,roe_cut",
             )
 
-            prime_data = stk_get_finance_prime(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            prime_data = stk_get_finance_prime_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="eps_basic,eps_dil,bps_pcom_ps,net_prof_pcom_yoy",
             )
 
-            valuation_data = stk_get_daily_valuation(
-                symbol=gm_symbol,
-                start_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
+            valuation_data = stk_get_daily_valuation_pt(
+                symbols=gm_symbol,
+                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="pb_lyr,pe_ttm,ps_ttm,pcf_ttm_oper,dy_ttm",
             )
 
             # 合并数据
-            balance_has_data = isinstance(balance_data, pd.DataFrame) and not balance_data.empty
-            income_has_data = isinstance(income_data, pd.DataFrame) and not income_data.empty
-            indicator_has_data = isinstance(indicator_data, pd.DataFrame) and not indicator_data.empty
-            prime_has_data = isinstance(prime_data, pd.DataFrame) and not prime_data.empty
-            valuation_has_data =  isinstance(valuation_data, pd.DataFrame) and not valuation_data.empty
+            balance_has_data = (
+                isinstance(balance_data, pd.DataFrame) and not balance_data.empty
+            )
+            income_has_data = (
+                isinstance(income_data, pd.DataFrame) and not income_data.empty
+            )
+            indicator_has_data = (
+                isinstance(indicator_data, pd.DataFrame) and not indicator_data.empty
+            )
+            prime_has_data = (
+                isinstance(prime_data, pd.DataFrame) and not prime_data.empty
+            )
+            valuation_has_data = (
+                isinstance(valuation_data, pd.DataFrame) and not valuation_data.empty
+            )
 
             if (
                 balance_has_data
@@ -239,6 +274,21 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         if "ttl_eqy" in balance_data.columns
                         else None
                     )
+                    # 计算负债率 (负债合计 / 资产总计 * 100)
+                    if (
+                        "ttl_liab" in balance_data.columns
+                        and "ttl_ast" in balance_data.columns
+                    ):
+                        ttl_ast_val = balance_data["ttl_ast"].iloc[0]
+                        ttl_liab_val = balance_data["ttl_liab"].iloc[0]
+                        if ttl_ast_val and ttl_liab_val and ttl_ast_val != 0:
+                            fina_data_dict["debt_ratio"] = (
+                                ttl_liab_val / ttl_ast_val
+                            ) * 100
+                        else:
+                            fina_data_dict["debt_ratio"] = None
+                    else:
+                        fina_data_dict["debt_ratio"] = None
 
                 # 从利润表获取数据
                 if isinstance(income_data, pd.DataFrame) and not income_data.empty:
@@ -303,7 +353,10 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         if "roe_weight" in indicator_data.columns
                         else None
                     )
-                    fina_data_dict["net_prof_pcom_yoy"] = (
+
+                # 从财务主要指标获取净利润增长率
+                if isinstance(prime_data, pd.DataFrame) and not prime_data.empty:
+                    fina_data_dict["profit_growth"] = (
                         prime_data["net_prof_pcom_yoy"].iloc[0]
                         if "net_prof_pcom_yoy" in prime_data.columns
                         else None
@@ -339,6 +392,21 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         if "pcf_ttm_oper" in valuation_data.columns
                         else None
                     )
+                    # 流通市值 (单位: 亿元)
+                    if "neg_mkt_cap" in valuation_data.columns:
+                        fina_data_dict["circulating_market_value"] = (
+                            valuation_data["neg_mkt_cap"].iloc[0] / 1e8
+                            if valuation_data["neg_mkt_cap"].iloc[0] is not None
+                            else None
+                        )
+                    elif "mkt_cap" in valuation_data.columns:
+                        fina_data_dict["circulating_market_value"] = (
+                            valuation_data["mkt_cap"].iloc[0] / 1e8
+                            if valuation_data["mkt_cap"].iloc[0] is not None
+                            else None
+                        )
+                    else:
+                        fina_data_dict["circulating_market_value"] = None
                 fina_data = pd.DataFrame([fina_data_dict])
             else:
                 print(f"掘金量化基本面数据获取失败，回退到akshare: {ts_code}")
@@ -435,22 +503,31 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
 
         # 技术面数据（新增下个交易日关键信号）
         try:
-            daily = history_n(symbol=gm_symbol, frequency='1d', count=60, adjust=ADJUST_PREV,
-                                  end_time=datetime.now().strftime("%Y-%m-%d"),
-                              fields='open,high,low,close,volume', df=True)
-            daily = daily.rename(columns={"eob": "date"})
+            # 使用新版API获取历史数据
+            daily = get_history_symbol(
+                symbols=gm_symbol,
+                start_date=(datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),
+                end_date=datetime.now().strftime("%Y-%m-%d"),
+                df=True,
+            )
+            daily = daily.rename(columns={"trade_date": "date"})
 
             if not isinstance(daily, pd.DataFrame) or daily.empty:
                 raise ValueError(f"掘金量化无{ts_code}技术面数据")
 
             # 获取最新价格
-            current_data = gm_api.current(gm_symbol, fields="price")
+            current_data = current(symbols=gm_symbol, fields="price")
             if isinstance(current_data, pd.DataFrame) and not current_data.empty:
-                current_price = current_data[0]['price']
+                current_price = current_data[0]["price"]
             else:
                 # 如果实时价格获取失败，使用历史数据的最新收盘价
-                current_price = daily["close"].iloc[-1] if not daily.empty and "close" in daily.columns and not daily["close"].isna().iloc[-1] else None
-
+                current_price = (
+                    daily["close"].iloc[-1]
+                    if not daily.empty
+                    and "close" in daily.columns
+                    and not daily["close"].isna().iloc[-1]
+                    else None
+                )
 
         except:
             symbol_clean = ts_code.split(".")[1]
@@ -476,14 +553,26 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 )
 
                 # 获取最新的akshare数据作为当前价格
-                current_price = daily["close"].iloc[-1] if not daily.empty and "close" in daily.columns and not daily["close"].isna().iloc[-1] else None
+                current_price = (
+                    daily["close"].iloc[-1]
+                    if not daily.empty
+                    and "close" in daily.columns
+                    and not daily["close"].isna().iloc[-1]
+                    else None
+                )
 
             except:
                 raise ValueError(f"技术面数据获取失败")
 
         # 确保技术数据包含当前价格
         if "current_price" not in locals():
-            current_price = daily["close"].iloc[-1] if not daily.empty and "close" in daily.columns and not daily["close"].isna().iloc[-1] else None
+            current_price = (
+                daily["close"].iloc[-1]
+                if not daily.empty
+                and "close" in daily.columns
+                and not daily["close"].isna().iloc[-1]
+                else None
+            )
 
         # 精简数据
         if limit_data and len(daily) > 5:
@@ -493,7 +582,7 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         daily["close"] = pd.to_numeric(daily["close"], errors="coerce")
         daily["ma5"] = daily["close"].rolling(5, min_periods=1).mean()
         daily["ma20"] = daily["close"].rolling(20, min_periods=1).mean()
-        
+
         # 仅在数据有效时进行计算
         if daily["close"].isna().all():
             daily["ma5"] = pd.Series([None] * len(daily), dtype=float)
@@ -516,21 +605,46 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         latest = daily.iloc[-1] if not daily.empty else None
         next_trading_signal = {
             "current_price": current_price,
-            "support_price": latest["low"] if latest is not None and "low" in latest and pd.notna(latest["low"]) else None,
-            "resistance_price": latest["high"] if latest is not None and "high" in latest and pd.notna(latest["high"]) else None,
+            "support_price": latest["low"]
+            if latest is not None and "low" in latest and pd.notna(latest["low"])
+            else None,
+            "resistance_price": latest["high"]
+            if latest is not None and "high" in latest and pd.notna(latest["high"])
+            else None,
             "ma20_position": "above"
-            if latest is not None and "close" in latest and "ma20" in latest and pd.notna(latest["close"]) and pd.notna(latest["ma20"]) and latest["close"] > latest["ma20"]
-            else "below" if latest is not None and "close" in latest and "ma20" in latest and pd.notna(latest["close"]) and pd.notna(latest["ma20"])
+            if latest is not None
+            and "close" in latest
+            and "ma20" in latest
+            and pd.notna(latest["close"])
+            and pd.notna(latest["ma20"])
+            and latest["close"] > latest["ma20"]
+            else "below"
+            if latest is not None
+            and "close" in latest
+            and "ma20" in latest
+            and pd.notna(latest["close"])
+            and pd.notna(latest["ma20"])
             else None,
             "volume_trend": "up"
-            if latest is not None and "volume" in latest and len(daily) >= 2 and daily.iloc[-2]["volume"] is not None
-            and pd.notna(latest["volume"]) and pd.notna(daily.iloc[-2]["volume"])
+            if latest is not None
+            and "volume" in latest
+            and len(daily) >= 2
+            and daily.iloc[-2]["volume"] is not None
+            and pd.notna(latest["volume"])
+            and pd.notna(daily.iloc[-2]["volume"])
             and latest["volume"] > daily.iloc[-2]["volume"]
-            else "down" if latest is not None and "volume" in latest and len(daily) >= 2 and daily.iloc[-2]["volume"] is not None
-            and pd.notna(latest["volume"]) and pd.notna(daily.iloc[-2]["volume"])
+            else "down"
+            if latest is not None
+            and "volume" in latest
+            and len(daily) >= 2
+            and daily.iloc[-2]["volume"] is not None
+            and pd.notna(latest["volume"])
+            and pd.notna(daily.iloc[-2]["volume"])
             else None,
             "rsi": daily["rsi"].iloc[-1]
-            if "rsi" in daily.columns and not daily.empty and not pd.isna(daily["rsi"].iloc[-1])
+            if "rsi" in daily.columns
+            and not daily.empty
+            and not pd.isna(daily["rsi"].iloc[-1])
             else None,
         }
 
@@ -538,19 +652,28 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         stock_name = None
         try:
             # 尝试从掘金API获取名称
-            stock_info = get_instruments(symbol=gm_symbol, fields="symbol,name")
-            if len(stock_info) > 0 and "name" in stock_info[0]:
-                stock_name = stock_info[0]["name"]
+            stock_info = get_symbol_infos(sec_type1=1010, symbols=gm_symbol)
+            if len(stock_info) > 0 and "sec_name" in stock_info[0]:
+                stock_name = stock_info[0]["sec_name"]
         except:
             # 如果掘金API失败，使用akshare获取
             try:
                 symbol_clean = ts_code.split(".")[0]
                 stock_info = ak.stock_info_a_code_name()
                 # akshare返回的列名可能是index和name，需要调整
-                if isinstance(stock_info, pd.DataFrame) and "code" in stock_info.columns:
+                if (
+                    isinstance(stock_info, pd.DataFrame)
+                    and "code" in stock_info.columns
+                ):
                     filtered = stock_info[stock_info["code"] == symbol_clean]
-                    stock_name = filtered["name"].iloc[0] if not filtered.empty else None
-                elif isinstance(stock_info, pd.DataFrame) and 0 in stock_info.columns and 1 in stock_info.columns:
+                    stock_name = (
+                        filtered["name"].iloc[0] if not filtered.empty else None
+                    )
+                elif (
+                    isinstance(stock_info, pd.DataFrame)
+                    and 0 in stock_info.columns
+                    and 1 in stock_info.columns
+                ):
                     filtered = stock_info[stock_info.iloc[:, 0] == symbol_clean]
                     stock_name = filtered.iloc[0, 1] if not filtered.empty else None
                 else:
@@ -565,7 +688,9 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
             "fundamental": fina_data.head(1).to_dict("records")[0]
             if isinstance(fina_data, pd.DataFrame) and not fina_data.empty
             else {},
-            "technical": daily.to_dict("records") if isinstance(daily, pd.DataFrame) and not daily.empty else [],
+            "technical": daily.to_dict("records")
+            if isinstance(daily, pd.DataFrame) and not daily.empty
+            else [],
             "next_trading_day": {
                 "date": NEXT_TRADING_DAY,
                 "key_signal": next_trading_signal,
@@ -625,8 +750,6 @@ def financial_price_select(symbol_pool, last_day, max_liab_rate=50):
     except Exception as e:
         print(f"基本面筛选失败: {str(e)}")
         return pd.DataFrame()
-
-
 
 
 @tool("ComplianceCheckTool")
@@ -810,8 +933,8 @@ def web_plagiarism_check(report_content: str) -> dict:
 agents = [
     Agent(
         role="小盘股基本面分析师",
-        goal=f"筛选{NEXT_TRADING_DAY}可买入的小盘股（流通市值<100亿、ROE>12%、净利润增长率>15%、负债率<60%），并分析下个交易日基本面支撑",
-        backstory="10年价值投资分析经验，擅长小盘股基本面挖掘，专注短期交易机会分析",
+        goal=f"基于QFII投资框架筛选{NEXT_TRADING_DAY}可买入的小盘股，严格执行价值投资标准：流通市值<100亿、ROE>12%、净利润增长率>15%、负债率<60%、上市满1年、非ST，采用DCF估值模型评估内在价值，分析下个交易日基本面支撑强度",
+        backstory="拥有15年机构投资经验，曾任职于头部券商研究所，专注小盘成长股价值挖掘，擅长运用QFII投资理念和DCF估值模型进行基本面分析，对财务指标异常波动有敏锐洞察力",
         verbose=True,
         llm=llm,
         tools=[get_a_share_data],
@@ -819,9 +942,9 @@ agents = [
         max_iter=10,
     ),
     Agent(
-        role="股性活跃度分析师",
-        goal=f"筛选{NEXT_TRADING_DAY}交易活跃的小盘股（换手率>3%、近30天有涨停、振幅>4%），并预测下个交易日活跃度",
-        backstory="专注交易活跃度分析，擅长识别短期热门股票和交易机会",
+        role="量化交易活跃度分析师",
+        goal=f"基于量价关系模型筛选{NEXT_TRADING_DAY}交易活跃的小盘股：换手率>3%、近30天有涨停、振幅>4%、成交量持续放大，运用波动率模型预测下个交易日活跃度和流动性风险",
+        backstory="量化交易专家，曾在对冲基金负责日内交易策略开发，擅长运用成交量分布模型和波动率指标识别短期交易机会，对市场微观结构和流动性特征有深入研究",
         verbose=True,
         llm=llm,
         tools=[get_a_share_data],
@@ -830,8 +953,8 @@ agents = [
     ),
     Agent(
         role="趋势技术分析师",
-        goal=f"分析{NEXT_TRADING_DAY}小盘股技术面信号（突破MA20、RSI>50、底部反转），给出买入/观望/卖出信号",
-        backstory="15年技术分析经验，擅长短期趋势识别和日内交易信号判断",
+        goal=f"运用多周期技术分析体系评估{NEXT_TRADING_DAY}小盘股技术面信号：突破MA20、RSI>50、底部反转形态确认，结合布林带和MACD指标给出明确的买入/观望/卖出信号",
+        backstory="18年技术分析经验，曾担任期货公司首席策略分析师，精通道氏理论、波浪理论和量价分析，擅长识别短期趋势转折点和关键技术形态，对支撑阻力位判断准确率高",
         verbose=True,
         llm=llm,
         tools=[get_a_share_data],
@@ -840,8 +963,8 @@ agents = [
     ),
     Agent(
         role="小盘股投资风控官",
-        goal=f"审核{NEXT_TRADING_DAY}投资组合（单票≤10%、总仓位≤80%、止损7%、质押率<40%），评估下行风险",
-        backstory="经历多轮牛熊，擅长小盘股短期交易风险控制和止损策略制定",
+        goal=f"基于VaR模型和压力测试审核{NEXT_TRADING_DAY}投资组合：单票仓位≤10%、总仓位≤80%、止损7%、质押率<40%，评估组合下行风险和极端市场环境下的表现",
+        backstory="经历多轮牛熊周期，曾在资产管理公司负责风险控制，擅长运用现代投资组合理论和风险价值模型进行风险评估，对小盘股特有风险有深入理解",
         verbose=True,
         llm=llm,
         tools=[get_a_share_data],
@@ -850,8 +973,8 @@ agents = [
     ),
     Agent(
         role="合规审查官",
-        goal=f"检查{NEXT_TRADING_DAY}投资分析报告的合规性（禁止收益承诺、ST股票、内幕信息表述等）",
-        backstory="证券行业合规专家，熟悉监管要求，擅长投资报告合规审查",
+        goal=f"严格按照《证券投资顾问业务暂行规定》检查{NEXT_TRADING_DAY}投资分析报告的合规性，确保符合监管要求",
+        backstory="证券行业合规专家，曾在证监会系统工作，熟悉各类监管规则和自律要求，擅长识别投资报告中的合规风险点，确保所有分析内容符合监管标准",
         verbose=True,
         llm=llm,
         tools=[compliance_check],
@@ -860,8 +983,8 @@ agents = [
     ),
     Agent(
         role="内容原创审核员",
-        goal="检查投资分析报告的网上抄袭情况，确保内容原创性",
-        backstory="资深内容审核专家，擅长文本相似度分析和抄袭识别",
+        goal="运用NLP文本相似度算法检查投资分析报告的网上抄袭情况，确保内容原创性和专业性",
+        backstory="资深内容审核专家，拥有新闻传播学背景，擅长运用自然语言处理技术进行文本相似度分析和抄袭识别，对金融分析报告的专业性标准有深入理解",
         verbose=True,
         llm=llm,
         tools=[web_plagiarism_check],
@@ -870,8 +993,8 @@ agents = [
     ),
     Agent(
         role="小盘股投资顾问",
-        goal=f"汇总所有分析结果，生成{NEXT_TRADING_DAY}最终投资分析报告（含标的、仓位、时机、风控、合规说明）",
-        backstory="丰富小盘股短线投资顾问经验，擅长整合多维度分析并给出明确交易建议",
+        goal=f"整合多维度分析结果，按照机构级投研标准生成{NEXT_TRADING_DAY}最终投资分析报告，包含明确的投资逻辑、风险收益分析和交易执行计划",
+        backstory="拥有丰富的小盘股短线投资顾问经验，曾服务于高净值客户，擅长整合基本面、技术面和量化分析结果，按照机构投研标准输出专业投资建议",
         verbose=True,
         llm=llm,
         allow_delegation=True,
@@ -963,6 +1086,7 @@ tasks = [
     ),
 ]
 
+
 # 创建数据库表
 def init_db():
     engine = create_mysql_engine()
@@ -978,11 +1102,12 @@ def extract_stocks_from_result(result):
     由于AI生成的格式可能不固定，我们需要解析文本内容来提取股票信息
     """
     import re
+
     selected_stocks = []
 
     # 尝试从结果文本中提取股票信息
     # 匹配股票代码和名称的模式，例如: 600000 浦发银行 或 000001 平安银行
-    stock_pattern = r'(\d{6})\s+([\u4e00-\u9fa5\w]+)'
+    stock_pattern = r"(\d{6})\s+([\u4e00-\u9fa5\w]+)"
     matches = re.findall(stock_pattern, result)
 
     for match in matches:
@@ -996,13 +1121,19 @@ def extract_stocks_from_result(result):
         # 在匹配到股票代码和名称的上下文中查找价格信息
         # 寻找类似"买入价: xx元"或"目标价: xx元"的模式
         context_start = max(0, result.find(f"{stock_code} {stock_name}") - 200)
-        context_end = min(len(result),
-                          result.find(f"{stock_code} {stock_name}") + len(f"{stock_code} {stock_name}") + 200)
+        context_end = min(
+            len(result),
+            result.find(f"{stock_code} {stock_name}")
+            + len(f"{stock_code} {stock_name}")
+            + 200,
+        )
         context = result[context_start:context_end]
 
         # 匹配买入价格
-        buy_patterns = [r'(?:买入价|买入点位|目标价|建议买入|买点)\s*[：:]*\s*([\d.]+)',
-                        r'([\d.]+)\s*(?:元|价格)\s*(?:附近|左右|位置)\s*买入']
+        buy_patterns = [
+            r"(?:买入价|买入点位|目标价|建议买入|买点)\s*[：:]*\s*([\d.]+)",
+            r"([\d.]+)\s*(?:元|价格)\s*(?:附近|左右|位置)\s*买入",
+        ]
         for pattern in buy_patterns:
             buy_match = re.search(pattern, context)
             if buy_match:
@@ -1013,8 +1144,10 @@ def extract_stocks_from_result(result):
                     continue
 
         # 匹配卖出价格
-        sell_patterns = [r'(?:卖出价|卖出点位|目标卖价|建议卖出|卖点)\s*[：:]*\s*([\d.]+)',
-                         r'([\d.]+)\s*(?:元|价格)\s*(?:附近|左右|位置)\s*卖出']
+        sell_patterns = [
+            r"(?:卖出价|卖出点位|目标卖价|建议卖出|卖点)\s*[：:]*\s*([\d.]+)",
+            r"([\d.]+)\s*(?:元|价格)\s*(?:附近|左右|位置)\s*卖出",
+        ]
         for pattern in sell_patterns:
             sell_match = re.search(pattern, context)
             if sell_match:
@@ -1024,12 +1157,14 @@ def extract_stocks_from_result(result):
                 except ValueError:
                     continue
 
-        selected_stocks.append({
-            "ts_code": stock_code,
-            "name": stock_name,
-            "buy_price": buy_price,
-            "sell_price": sell_price
-        })
+        selected_stocks.append(
+            {
+                "ts_code": stock_code,
+                "name": stock_name,
+                "buy_price": buy_price,
+                "sell_price": sell_price,
+            }
+        )
 
     return selected_stocks
 
@@ -1048,8 +1183,7 @@ def save_report_to_db(report_content, selected_stocks):
 
         # 保存投资报告
         report = InvestmentReport(
-            report_date=NEXT_TRADING_DAY,
-            report_content=report_content
+            report_date=NEXT_TRADING_DAY, report_content=report_content
         )
         session.add(report)
         session.commit()
@@ -1059,11 +1193,11 @@ def save_report_to_db(report_content, selected_stocks):
         for stock in selected_stocks:
             stock_record = SelectedStock(
                 report_date=NEXT_TRADING_DAY,
-                stock_code=stock.get('ts_code', ''),
-                stock_name=stock.get('name', ''),
-                buy_price=stock.get('buy_price', None),
-                sell_price=stock.get('sell_price', None),
-                buy_date=NEXT_TRADING_DAY
+                stock_code=stock.get("ts_code", ""),
+                stock_name=stock.get("name", ""),
+                buy_price=stock.get("buy_price", None),
+                sell_price=stock.get("sell_price", None),
+                buy_date=NEXT_TRADING_DAY,
             )
             session.add(stock_record)
 
@@ -1073,7 +1207,10 @@ def save_report_to_db(report_content, selected_stocks):
     except Exception as e:
         print(f"❌ 保存到数据库失败: {str(e)}")
         import traceback
+
         traceback.print_exc()
+
+
 # ====================== 执行流程 ======================
 if __name__ == "__main__":
     try:
@@ -1151,6 +1288,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ 数据库操作失败: {str(e)}")
             import traceback
+
             traceback.print_exc()
 
     except (APITimeoutError, APIConnectionError) as e:
@@ -1161,6 +1299,7 @@ if __name__ == "__main__":
         import traceback
 
         traceback.print_exc()
+
 
 # 数据库配置
 def create_mysql_engine():
@@ -1173,12 +1312,12 @@ def create_mysql_engine():
     passwd = os.getenv("DB_PASSWORD", "")
     port = os.getenv("DB_PORT", "3306")
     db = os.getenv("DB_NAME", "stock_base")
-    
+
     try:
         # 创建连接数据库的引擎
         db_engine = sqlalchemy.create_engine(
-            f'mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8',
-            poolclass=sqlalchemy.pool.NullPool
+            f"mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8",
+            poolclass=sqlalchemy.pool.NullPool,
         )
         # 测试连接
         with db_engine.connect() as conn:
@@ -1189,22 +1328,26 @@ def create_mysql_engine():
         # 尝试连接到服务器但不指定数据库，以检查是否可以创建数据库
         try:
             server_engine = sqlalchemy.create_engine(
-                f'mysql+pymysql://{user}:{passwd}@{host}:{port}',
-                poolclass=sqlalchemy.pool.NullPool
+                f"mysql+pymysql://{user}:{passwd}@{host}:{port}",
+                poolclass=sqlalchemy.pool.NullPool,
             )
             with server_engine.connect() as conn:
-                conn.execute(sqlalchemy.text(f"CREATE DATABASE IF NOT EXISTS `{db}` CHARACTER SET utf8mb4"))
+                conn.execute(
+                    sqlalchemy.text(
+                        f"CREATE DATABASE IF NOT EXISTS `{db}` CHARACTER SET utf8mb4"
+                    )
+                )
             print(f"✅ 数据库 '{db}' 创建成功")
         except Exception as create_error:
             print(f"❌ 创建数据库失败: {str(create_error)}")
             # 如果无法创建数据库，返回None表示连接失败
             return None
-        
+
         # 再次尝试连接到数据库
         try:
             db_engine = sqlalchemy.create_engine(
-                f'mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8',
-                poolclass=sqlalchemy.pool.NullPool
+                f"mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8",
+                poolclass=sqlalchemy.pool.NullPool,
             )
             with db_engine.connect() as conn:
                 pass
@@ -1213,32 +1356,39 @@ def create_mysql_engine():
             print(f"❌ 最终数据库连接失败: {str(final_error)}")
             return None
 
+
 # 创建ORM基类
 Base = declarative_base()
+
 
 class InvestmentReport(Base):
     """
     投资报告表
     """
-    __tablename__ = 'investment_reports'
-    
+
+    __tablename__ = "investment_reports"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
-    report_date = Column(Date, nullable=False, comment='报告日期')
-    report_content = Column(Text, nullable=False, comment='报告内容')
-    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    report_date = Column(Date, nullable=False, comment="报告日期")
+    report_content = Column(Text, nullable=False, comment="报告内容")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+    updated_at = Column(
+        DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
+    )
+
 
 class SelectedStock(Base):
     """
     选中股票表
     """
-    __tablename__ = 'selected_stocks'
-    
+
+    __tablename__ = "selected_stocks"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
-    report_date = Column(Date, nullable=False, comment='报告日期')
-    stock_code = Column(String(20), nullable=False, comment='股票代码')
-    stock_name = Column(String(100), nullable=False, comment='股票名称')
-    buy_price = Column(Float, comment='买入价格')
-    sell_price = Column(Float, comment='卖出价格')
-    buy_date = Column(Date, nullable=False, comment='买入日期')
-    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+    report_date = Column(Date, nullable=False, comment="报告日期")
+    stock_code = Column(String(20), nullable=False, comment="股票代码")
+    stock_name = Column(String(100), nullable=False, comment="股票名称")
+    buy_price = Column(Float, comment="买入价格")
+    sell_price = Column(Float, comment="卖出价格")
+    buy_date = Column(Date, nullable=False, comment="买入日期")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
