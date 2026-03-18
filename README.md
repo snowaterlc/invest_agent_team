@@ -190,3 +190,19 @@ token = os.getenv('GM_API_TOKEN')
 - 确保安装了最新版本的 gm SDK（>=3.0.148）。
 
 如需更详细的API使用示例，请参考掘金量化官方文档：https://www.myquant.cn/docs2/sdk/python/
+## 赞助支持
+
+如果你喜欢这个项目，欢迎扫码赞助支持！
+
+### 微信支付
+
+![微信支付](wechat_qr.png)
+
+### 支付宝
+
+![支付宝](alipay_qr.png)
+
+感谢你的支持！所有赞助将用于：
+- 服务器维护
+- API 调用费用
+- 功能开发
