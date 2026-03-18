@@ -25,19 +25,19 @@ load_dotenv()
 os.makedirs("./cache", exist_ok=True)
 
 
-# LLM配置（DeepSeek兼容）
-def get_deepseek_llm():
+# LLM配置（Kimi2兼容OpenAI API）
+def get_kimi_llm():
     return ChatOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
-        model="deepseek-chat",
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.moonshot.cn/v1"),
+        model="moonshot-v1-32k",
         temperature=0.1,
-        timeout=30.0,  # 减少超时时间
-        max_retries=2,  # 减少重试次数
+        timeout=30.0,
+        max_retries=2,
     )
 
 
-llm = get_deepseek_llm()
+llm = get_kimi_llm()
 
 # 数据源初始化
 gm_api_token = os.getenv("GM_API_TOKEN")
@@ -306,11 +306,10 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 raise ValueError(f"掘金无技术面数据")
 
             # 获取最新价格
-            current_data = current(symbols=gm_symbol, fields="price")
-            if isinstance(current_data, list) and len(current_data) > 0:
-                current_price = current_data[0]["price"]
-            elif isinstance(current_data, pd.DataFrame) and not current_data.empty:
-                current_price = current_data.iloc[0]["price"]
+            current_data = current(symbols=gm_symbol)
+            if current_data and len(current_data) > 0:
+                tick = current_data[0]
+                current_price = tick.price if hasattr(tick, 'price') else (tick.get('price') if isinstance(tick, dict) else None)
             else:
                 current_price = daily["close"].iloc[-1]
 

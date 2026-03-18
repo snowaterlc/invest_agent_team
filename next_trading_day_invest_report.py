@@ -43,19 +43,19 @@ except Exception as e:
     NEXT_TRADING_DAY = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-# LLM配置（DeepSeek兼容）
-def get_deepseek_llm():
+# LLM配置（Kimi2兼容OpenAI API）
+def get_kimi_llm():
     return ChatOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
-        model="deepseek-chat",
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.moonshot.cn/v1"),
+        model="moonshot-v1-32k",
         temperature=0.1,
         timeout=30.0,
         max_retries=2,
     )
 
 
-llm = get_deepseek_llm()
+llm = get_kimi_llm()
 
 
 # ====================== 核心工具扩展 ======================
@@ -486,11 +486,11 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 raise ValueError(f"掘金量化无{ts_code}技术面数据")
 
             # 获取最新价格
-            current_data = current(symbols=gm_symbol, fields="price")
-            if isinstance(current_data, pd.DataFrame) and not current_data.empty:
-                current_price = current_data[0]["price"]
+            current_data = current(symbols=gm_symbol)
+            if current_data and len(current_data) > 0:
+                tick = current_data[0]
+                current_price = tick.price if hasattr(tick, 'price') else (tick.get('price') if isinstance(tick, dict) else None)
             else:
-                # 如果实时价格获取失败，使用历史数据的最新收盘价
                 current_price = (
                     daily["close"].iloc[-1]
                     if not daily.empty
@@ -1117,14 +1117,14 @@ if __name__ == "__main__":
             f.write("## 四、数据来源与工具\n")
             f.write("- 基本面/技术面数据：掘金量化、AkShare\n")
             f.write("- AI框架：CrewAI（多智能体协作）\n")
-            f.write("- LLM模型：DeepSeek Chat\n")
+            f.write("- LLM模型：Kimi2 (moonshot-v1-32k)\n")
             f.write("- 合规检查：内置监管规则引擎\n")
             f.write("- 原创性审核：基于网络文本相似度分析\n")
 
         print(f"\n✅ 报告已保存至：{report_path}")
 
     except (APITimeoutError, APIConnectionError) as e:
-        print(f"\n❌ 连接到DeepSeek API失败: {str(e)}")
+        print(f"\n❌ 连接到Kimi API失败: {str(e)}")
         print("请检查网络连接和API密钥配置")
     except Exception as e:
         print(f"\n❌ 程序执行出错: {str(e)}")

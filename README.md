@@ -1,6 +1,16 @@
 # AIGC 项目使用手册
 
-本项目基于 Python，依赖项来自 requirements.txt，包含 crewai、crewa i-tools、langchain、langchain-openai、akshare、gm、python-dotenv、pandas、numpy、pymysql、sqlalchemy 等。本文档旨在帮助开发者快速搭建环境、配置依赖、运行程序以及常见维护工作。
+本项目基于 Python，使用 CrewAI 多智能体框架和 Kimi2 AI 模型，支持掘金量化和 AkShare 数据源，生成 A 股小盘股投资分析报告。
+
+## 项目简介
+
+- **AI 模型**: Kimi2 (moonshot-v1-32k)
+- **数据源**: 掘金量化、AkShare
+- **数据库**: MySQL
+- **框架**: CrewAI（多智能体协作）
+- **语言**: Python 3.13
+
+本文档旨在帮助开发者快速搭建环境、配置依赖、运行程序以及常见维护工作。
 
 目录
 - 环境要求
@@ -55,20 +65,31 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ### 2.3 配置环境变量
-常用变量示例：
-- OPENAI_API_KEY：OpenAI 密钥
-- DATABASE_URL：数据库连接字符串，例如 `mysql+pymysql://user:password@host:port/dbname`
-- LOG_LEVEL：日志等级
-- APP_HOST、APP_PORT：应用绑定地址与端口
 
-可以将变量写入 `.env` 文件，项目若使用 python-dotenv 或自定义加载，将自动读取。示例：
+本项目使用 `.env` 文件管理环境变量，请按以下格式配置：
+
 ```
-OPENAI_API_KEY=your_openai_api_key
-DATABASE_URL=mysql+pymysql://user:password@localhost:3306/aigc
+# Kimi API 配置（必需）
+OPENAI_API_KEY=your_kimi_api_key
+OPENAI_BASE_URL=https://api.moonshot.cn/v1
+
+# 掘金量化 Token（必需）
+GM_API_TOKEN=your_gm_token
+
+# MySQL 数据库配置（可选，默认使用本地数据库）
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=your_password
+DB_NAME=stock_base
+
+# 日志等级（可选）
 LOG_LEVEL=INFO
-APP_HOST=0.0.0.0
-APP_PORT=8000
 ```
+
+**注意**: 
+- 请确保 `OPENAI_API_KEY` 是 Kimi 的 API 密钥
+- 如需使用 DeepSeek，请修改 `OPENAI_BASE_URL` 为 `https://api.deepseek.com/v1`
 
 ### 2.4 运行验证
 进入项目根目录后，尝试启动入口脚本以确认环境就绪。
@@ -110,7 +131,14 @@ pytest
 - 如需开发新功能，请更新本手册以覆盖新的运行方式与依赖。
 
 ## 9. 变更日志
-- 初版手册，基于当前仓库依赖与常见用法编写。
+
+### 2026-03-16 更新
+- AI 模型从 DeepSeek 迁移至 Kimi2
+- 修复多个 Bug（缓存过期、数据库连接等）
+- 新增模块化代码结构（config.py、utils.py、data_fetcher.py、analyzer.py）
+
+### 历史版本
+- 初始版本基于 DeepSeek API
 
 如需调整或扩展，请告诉我你希望加入的入口点信息、部署方式或 CI/CD 工作流，我可以追加到此 README 中。
 

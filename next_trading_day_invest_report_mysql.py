@@ -1,38 +1,130 @@
 import os
 import re
 import warnings
+import logging
+import time
 from urllib.parse import quote
-from typing import Optional  # 添加Optional导入
+from typing import Optional, Dict, List, Any, Union
+from functools import wraps
+from datetime import datetime, timedelta
 
 import akshare as ak
 import numpy as np
-from gm.api import *
-import gm.api as gm_api
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool
 from dotenv import load_dotenv
-from gm.api import history, get_instruments
 from langchain_openai import ChatOpenAI
 from openai import APITimeoutError, APIConnectionError
-from datetime import datetime, timedelta
 
-# 添加MySQL相关导入
 import sqlalchemy
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    Float,
-    Text,
-    DateTime,
-    Date,
-)
+from sqlalchemy import *
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+
+from gm.api import *
+
+# 日志配置
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('./cache/invest_agent.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# 缓存配置
+CACHE_EXPIRE_SECONDS = 3600
+
+# 自定义异常类
+class DataFetchError(Exception):
+    """数据获取异常"""
+    pass
+
+class CacheError(Exception):
+    """缓存操作异常"""
+    pass
+
+class APIError(Exception):
+    """API调用异常"""
+    pass
+
+# 重试装饰器
+def retry_on_error(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
+    """
+    重试装饰器
+    :param max_retries: 最大重试次数
+    :param delay: 初始延迟时间（秒）
+    :param backoff: 延迟时间倍数
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            current_delay = delay
+            
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except (requests.Timeout, requests.ConnectionError) as e:
+                    last_exception = e
+                    logger.warning(f"{func.__name__} 第{attempt + 1}次尝试失败: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(current_delay)
+                        current_delay *= backoff
+                except Exception as e:
+                    logger.error(f"{func.__name__} 发生不可重试错误: {e}")
+                    raise
+            
+            logger.error(f"{func.__name__} 重试{max_retries}次后仍失败")
+            raise APIError(f"重试{max_retries}次后仍失败: {last_exception}")
+        return wrapper
+    return decorator
+
+
+def is_cache_valid(cache_path: str) -> bool:
+    """检查缓存是否有效（未过期）"""
+    if not os.path.exists(cache_path):
+        return False
+    file_time = os.path.getmtime(cache_path)
+    return (time.time() - file_time) < CACHE_EXPIRE_SECONDS
+
+
+def safe_get_value(df, column: str, default=None):
+    """安全获取DataFrame中的值"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return default
+    if column not in df.columns:
+        return default
+    value = df[column].iloc[0]
+    return value if pd.notna(value) else default
+
+
+def safe_get_values(df, columns: List[str], defaults: Any = None) -> Dict:
+    """安全批量获取DataFrame中的值"""
+    result = {}
+    defaults_list = [defaults] * len(columns) if not isinstance(defaults, list) else defaults
+    
+    for i, column in enumerate(columns):
+        result[column] = safe_get_value(df, column, defaults_list[i] if i < len(defaults_list) else None)
+    return result
+
+
+def convert_ts_code(ts_code: str) -> str:
+    """将标准股票代码转换为掘金格式"""
+    if not ts_code:
+        return ""
+    ts_code = ts_code.strip().upper()
+    if "." not in ts_code:
+        if ts_code.startswith("6"):
+            return f"SHSE.{ts_code}"
+        elif ts_code.startswith(("0", "3")):
+            return f"SZSE.{ts_code}"
+    return ts_code
 
 # 基础配置
 warnings.filterwarnings("ignore")
@@ -44,7 +136,6 @@ gm_api_token = os.getenv("GM_API_TOKEN")
 if gm_api_token:
     set_token(gm_api_token)
 try:
-    # 使用新版API获取下个交易日
     trading_dates = get_next_n_trading_dates(
         date=datetime.now().strftime("%Y-%m-%d"), n=1, exchange="SHSE"
     )
@@ -53,27 +144,367 @@ try:
         if trading_dates
         else (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
     )
+    logger.info(f"下个交易日: {NEXT_TRADING_DAY}")
 except Exception as e:
-    print(f"获取交易日历失败: {e}")
+    logger.warning(f"获取交易日历失败: {e}")
     NEXT_TRADING_DAY = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-# LLM配置（DeepSeek兼容）
-def get_deepseek_llm():
+# LLM配置（Kimi2兼容OpenAI API）
+def get_kimi_llm():
     return ChatOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
-        model="deepseek-chat",
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.moonshot.cn/v1"),
+        model="moonshot-v1-32k",
         temperature=0.1,
         timeout=30.0,
         max_retries=2,
     )
 
 
-llm = get_deepseek_llm()
+llm = get_kimi_llm()
+
+
+# ====================== 数据库配置 ======================
+def create_mysql_engine():
+    """
+    创建数据库引擎对象
+    """
+    host = os.getenv("DB_HOST", "localhost")
+    user = os.getenv("DB_USER", "root")
+    passwd = os.getenv("DB_PASSWORD", "")
+    port = os.getenv("DB_PORT", "3306")
+    db = os.getenv("DB_NAME", "stock_base")
+
+    try:
+        db_engine = sqlalchemy.create_engine(
+            f"mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8",
+            poolclass=sqlalchemy.pool.NullPool,
+        )
+        with db_engine.connect() as conn:
+            pass
+        return db_engine
+    except Exception as e:
+        logger.error(f"数据库连接失败: {str(e)}")
+        try:
+            server_engine = sqlalchemy.create_engine(
+                f"mysql+pymysql://{user}:{passwd}@{host}:{port}",
+                poolclass=sqlalchemy.pool.NullPool,
+            )
+            with server_engine.connect() as conn:
+                conn.execute(
+                    sqlalchemy.text(
+                        f"CREATE DATABASE IF NOT EXISTS `{db}` CHARACTER SET utf8mb4"
+                    )
+                )
+            logger.info(f"数据库 '{db}' 创建成功")
+        except Exception as create_error:
+            logger.error(f"创建数据库失败: {str(create_error)}")
+            return None
+
+        try:
+            db_engine = sqlalchemy.create_engine(
+                f"mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8",
+                poolclass=sqlalchemy.pool.NullPool,
+            )
+            with db_engine.connect() as conn:
+                pass
+            return db_engine
+        except Exception as final_error:
+            logger.error(f"最终数据库连接失败: {str(final_error)}")
+            return None
+
+
+# 创建ORM基类
+Base = declarative_base()
 
 
 # ====================== 核心工具扩展 ======================
+
+def _get_a_share_data_internal(ts_code: Optional[str] = None, limit_data: bool = True) -> dict:
+    """获取A股主板股票数据内部实现（不带装饰器，可直接调用）"""
+    if ts_code is not None:
+        ts_code = str(ts_code)
+        import re
+        ts_code = re.sub(r"\.SH|\.SZ", "", ts_code)
+        ts_code = ts_code.zfill(6)
+        if ts_code.startswith("6"):
+            ts_code = f"SHSE.{ts_code}"
+        elif ts_code.startswith(("0", "3")):
+            ts_code = f"SZSE.{ts_code}"
+
+    fina_data = pd.DataFrame()
+    daily = pd.DataFrame()
+
+    if ts_code is None:
+        try:
+            stock_df = get_symbols(
+                sec_type1=1010,
+                sec_type2=101001,
+                exchanges="SHSE,SZSE",
+                skip_suspended=True,
+                skip_st=True,
+                df=True,
+            )
+
+            stock_df["ts_code"] = stock_df["symbol"]
+            stock_df["name"] = stock_df["sec_name"]
+            stock_df["symbol"] = stock_df["symbol"]
+
+            if "list_date" in stock_df.columns:
+                stock_df["list_date"] = pd.to_datetime(stock_df["list_date"], errors="coerce")
+                one_year_ago = datetime.now() - timedelta(days=365)
+                stock_df = stock_df[stock_df["list_date"] <= one_year_ago]
+
+            stock_df = stock_df.head(100)
+            return stock_df.to_dict("records")
+        except Exception as e:
+            logger.error(f"获取股票列表失败: {str(e)}")
+            return []
+
+    gm_symbol = set_em_symble(ts_code)
+
+    try:
+        balance_data = stk_get_fundamentals_balance_pt(
+            symbols=gm_symbol,
+            date=datetime.now().strftime("%Y-%m-%d"),
+            fields="ttl_ast,mny_cptl,ttl_cur_ast,ttl_ncur_ast,ttl_liab,ttl_eqy",
+        )
+        income_data = stk_get_fundamentals_income_pt(
+            symbols=gm_symbol,
+            date=datetime.now().strftime("%Y-%m-%d"),
+            fields="inc_oper,net_prof,oper_prof,ttl_prof,biz_tax_sur,exp_sell,exp_adm,exp_rd,exp_fin",
+        )
+        indicator_data = stk_get_finance_deriv_pt(
+            symbols=gm_symbol,
+            date=datetime.now().strftime("%Y-%m-%d"),
+            fields="roe,roe_weight,roe_avg,roe_cut",
+        )
+
+        prime_data = stk_get_finance_prime_pt(
+            symbols=gm_symbol,
+            date=datetime.now().strftime("%Y-%m-%d"),
+            fields="eps_basic,eps_dil,bps_pcom_ps,net_prof_pcom_yoy",
+        )
+
+        valuation_data = stk_get_daily_valuation_pt(
+            symbols=gm_symbol,
+            fields="pb_lyr,pe_ttm,ps_ttm,pcf_ttm_oper,dy_ttm",
+        )
+
+        balance_has_data = (
+            isinstance(balance_data, pd.DataFrame) and not balance_data.empty
+        )
+        income_has_data = (
+            isinstance(income_data, pd.DataFrame) and not income_data.empty
+        )
+        indicator_has_data = (
+            isinstance(indicator_data, pd.DataFrame) and not indicator_data.empty
+        )
+        prime_has_data = (
+            isinstance(prime_data, pd.DataFrame) and not prime_data.empty
+        )
+        valuation_has_data = (
+            isinstance(valuation_data, pd.DataFrame) and not valuation_data.empty
+        )
+
+        if balance_has_data:
+            balance_data = balance_data.add_prefix("bal_")
+            fina_data = balance_data
+        if income_has_data:
+            income_data = income_data.add_prefix("inc_")
+            fina_data = (
+                pd.concat([fina_data, income_data], axis=1)
+                if not fina_data.empty
+                else income_data
+            )
+        if indicator_has_data:
+            indicator_data = indicator_data.add_prefix("ind_")
+            fina_data = (
+                pd.concat([fina_data, indicator_data], axis=1)
+                if not fina_data.empty
+                else indicator_data
+            )
+        if prime_has_data:
+            prime_data = prime_data.add_prefix("prime_")
+            fina_data = (
+                pd.concat([fina_data, prime_data], axis=1)
+                if not fina_data.empty
+                else prime_data
+            )
+        if valuation_has_data:
+            valuation_data = valuation_data.add_prefix("val_")
+            fina_data = (
+                pd.concat([fina_data, valuation_data], axis=1)
+                if not fina_data.empty
+                else valuation_data
+            )
+
+    except Exception as e:
+        logger.warning(f"掘金量化基本面数据获取失败: {str(e)}，回退到akshare")
+        if "gm_symbol" not in locals():
+            gm_symbol = set_em_symble(ts_code)
+        try:
+            symbol_clean = ts_code.split(".")[-1]
+            fina_data = ak.stock_financial_abstract(symbol=symbol_clean)
+            if isinstance(fina_data, pd.DataFrame) and fina_data.empty:
+                fina_data = pd.DataFrame()
+            else:
+                required_cols = [
+                    "roe",
+                    "net_profit",
+                    "profit_growth_rate",
+                    "total_assets",
+                    "debt_to_assets_ratio",
+                    "pledge_ratio",
+                    "inc_oper",
+                    "oper_prof",
+                    "ttl_prof",
+                    "biz_tax_sur",
+                    "exp_sell",
+                    "exp_adm",
+                    "exp_rd",
+                    "exp_fin",
+                    "pe_ttm",
+                    "ps_ttm",
+                    "pb_lyr",
+                    "pcf_ttm_oper",
+                    "roe_weight",
+                    "net_prof_pcom_yoy",
+                ]
+                fina_data = (
+                    fina_data[required_cols].head(1)
+                    if all(col in fina_data.columns for col in required_cols)
+                    else fina_data.head(1)
+                )
+                fina_data["ts_code"] = ts_code
+        except:
+            fina_data = pd.DataFrame()
+
+    try:
+        daily = get_history_symbol(
+            symbol=gm_symbol,
+            start_date=(datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),
+            end_date=datetime.now().strftime("%Y-%m-%d"),
+            df=True,
+        )
+        daily = daily.rename(columns={"trade_date": "date"})
+
+        if not isinstance(daily, pd.DataFrame) or daily.empty:
+            raise ValueError(f"掘金量化无{ts_code}技术面数据")
+
+        current_price = None
+        try:
+            current_data = current(symbols=gm_symbol)
+            if current_data and len(current_data) > 0:
+                tick = current_data[0]
+                current_price = tick.price if hasattr(tick, 'price') else (tick.get('price') if isinstance(tick, dict) else None)
+        except Exception as e:
+            logger.debug(f"实时价格获取失败，回退到历史数据: {e}")
+        
+        if not current_price or (isinstance(current_price, float) and current_price <= 0):
+            if not daily.empty and "close" in daily.columns:
+                valid_closes = daily["close"].dropna()
+                if not valid_closes.empty:
+                    current_price = valid_closes.iloc[-1]
+                    logger.debug(f"使用最近交易日收盘价: {current_price}")
+
+    except:
+        symbol_clean = ts_code.split(".")[-1]  # 修复：取最后一部分，如SHSE.600000 -> 600000
+        try:
+            daily = ak.stock_zh_a_hist(
+                symbol=symbol_clean,
+                period="daily",
+                start_date=(datetime.now() - timedelta(days=60)).strftime("%Y%m%d"),
+                end_date=datetime.now().strftime("%Y%m%d"),
+                adjust="",
+            )
+            if not isinstance(daily, pd.DataFrame) or daily.empty:
+                raise ValueError(f"akshare无{ts_code}技术面数据")
+            daily = daily.rename(
+                columns={
+                    "日期": "date",
+                    "开盘": "open",
+                    "收盘": "close",
+                    "最高": "high",
+                    "最低": "low",
+                    "成交量": "volume",
+                }
+            )
+
+            if not daily.empty and "close" in daily.columns:
+                valid_closes = daily["close"].dropna()
+                current_price = valid_closes.iloc[-1] if not valid_closes.empty else None
+
+        except Exception as e:
+            logger.error(f"技术面数据获取失败: {e}")
+            raise ValueError(f"技术面数据获取失败")
+
+    if "current_price" not in locals() or not current_price:
+        if not daily.empty and "close" in daily.columns:
+            valid_closes = daily["close"].dropna()
+            current_price = valid_closes.iloc[-1] if not valid_closes.empty else None
+
+    if limit_data and len(daily) > 5:
+        daily = daily.tail(5).reset_index(drop=True)
+
+    daily["close"] = pd.to_numeric(daily["close"], errors="coerce")
+    daily["ma5"] = daily["close"].rolling(5, min_periods=1).mean()
+    daily["ma20"] = daily["close"].rolling(20, min_periods=1).mean()
+    daily["vol_ma5"] = daily["volume"].rolling(5, min_periods=1).mean()
+
+    delta = daily["close"].diff()
+    gain = delta.where(delta > 0, 0).rolling(window=14, min_periods=1).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+    rs = gain / loss
+    daily["rsi"] = 100 - (100 / (1 + rs))
+
+    latest = daily.iloc[-1] if not daily.empty else None
+
+    next_trading_signal = {
+        "current_price": current_price,
+        "support_price": latest["low"] if latest is not None and "low" in latest and pd.notna(latest["low"]) else None,
+        "resistance_price": latest["high"] if latest is not None and "high" in latest and pd.notna(latest["high"]) else None,
+        "ma20_position": "above" if latest is not None and "close" in latest and "ma20" in latest and pd.notna(latest["close"]) and pd.notna(latest["ma20"]) and latest["close"] > latest["ma20"] else "below" if latest is not None and "close" in latest and "ma20" in latest and pd.notna(latest["close"]) and pd.notna(latest["ma20"]) else None,
+        "volume_trend": "up" if latest is not None and "volume" in latest and len(daily) >= 2 and daily.iloc[-2]["volume"] is not None and pd.notna(latest["volume"]) and pd.notna(daily.iloc[-2]["volume"]) and latest["volume"] > daily.iloc[-2]["volume"] else "down" if latest is not None and "volume" in latest and len(daily) >= 2 and daily.iloc[-2]["volume"] is not None and pd.notna(latest["volume"]) and pd.notna(daily.iloc[-2]["volume"]) else None,
+        "rsi": daily["rsi"].iloc[-1] if "rsi" in daily.columns and not daily.empty and not pd.isna(daily["rsi"].iloc[-1]) else None,
+    }
+
+    stock_name = None
+    try:
+        stock_info = get_symbol_infos(sec_type1=1010, symbols=gm_symbol)
+        if len(stock_info) > 0 and "sec_name" in stock_info[0]:
+            stock_name = stock_info[0]["sec_name"]
+    except:
+        try:
+            symbol_clean = ts_code.split(".")[-1]
+            stock_info = ak.stock_info_a_code_name()
+            if isinstance(stock_info, pd.DataFrame) and "code" in stock_info.columns:
+                filtered = stock_info[stock_info["code"] == symbol_clean]
+                stock_name = filtered["name"].iloc[0] if not filtered.empty else None
+            elif isinstance(stock_info, pd.DataFrame) and 0 in stock_info.columns and 1 in stock_info.columns:
+                filtered = stock_info[stock_info.iloc[:, 0] == symbol_clean]
+                stock_name = filtered.iloc[0, 1] if not filtered.empty else None
+            else:
+                stock_name = None
+        except:
+            stock_name = None
+
+    result = {
+        "ts_code": ts_code,
+        "name": stock_name,
+        "fundamental": fina_data.head(1).to_dict("records")[0] if isinstance(fina_data, pd.DataFrame) and not fina_data.empty else {},
+        "technical": daily.to_dict("records") if isinstance(daily, pd.DataFrame) and not daily.empty else [],
+        "next_trading_day": {
+            "date": NEXT_TRADING_DAY,
+            "key_signal": next_trading_signal,
+            "suggested_strategy": "",
+        },
+    }
+
+    return result
+
+
 @tool("AShareDataTool")
 def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> dict:
     """获取A股主板股票数据（基本面+技术面），新增下个交易日关键信号"""
@@ -96,8 +527,8 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         else "./cache/a_share_mainboard_list.json"
     )
 
-    # 缓存读取
-    if os.path.exists(cache_path):
+    # 缓存读取（带过期检查）
+    if is_cache_valid(cache_path):
         try:
             data = pd.read_json(cache_path, orient="records")
             # 确保ts_code和symbol保持为字符串类型（防止pandas自动转换为整数）
@@ -107,13 +538,14 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 data["symbol"] = data["symbol"].astype(str)
             if ts_code is None and isinstance(data, pd.DataFrame) and len(data) > 10:
                 data = data.head(10)
+            logger.info(f"使用缓存数据: {cache_path}")
             return (
                 data.to_dict("records")[0]
                 if ts_code is not None
                 else {"stock_list": data.to_dict("records")}
             )
         except Exception as e:
-            print(f"缓存读取失败，重新获取: {e}")
+            logger.warning(f"缓存读取失败，重新获取: {e}")
 
     try:
         # 股票列表获取
@@ -179,7 +611,7 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         item["ts_code"] = str(item.get("symbol", ""))
                     return {"stock_list": stock_list}
                 except Exception as e:
-                    print(f"所有数据源都失败: {str(e)}")
+                    logger.error(f"所有数据源都失败: {str(e)}")
                     return {"stock_list": []}
 
         # 基本面数据
@@ -210,7 +642,6 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
 
             valuation_data = stk_get_daily_valuation_pt(
                 symbols=gm_symbol,
-                date=datetime.now().strftime("%Y-%m-%d"),
                 fields="pb_lyr,pe_ttm,ps_ttm,pcf_ttm_oper,dy_ttm",
             )
 
@@ -409,7 +840,7 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         fina_data_dict["circulating_market_value"] = None
                 fina_data = pd.DataFrame([fina_data_dict])
             else:
-                print(f"掘金量化基本面数据获取失败，回退到akshare: {ts_code}")
+                logger.warning(f"掘金量化基本面数据获取失败，回退到akshare: {ts_code}")
 
                 # 如果掘金新API都失败，回退到akshare
                 try:
@@ -420,7 +851,7 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                     )  # 获取基本面指标
                     if isinstance(fina_data, pd.DataFrame) and fina_data.empty:
                         # 如果akshare也失败，返回空数据
-                        print(f"akshare无{ts_code}基本面数据")
+                        logger.info(f"akshare无{ts_code}基本面数据")
                         fina_data = pd.DataFrame()
                     else:
                         # 只保留关键基本面指标
@@ -457,15 +888,15 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                         fina_data["ts_code"] = ts_code
                 except Exception as e:
                     # 如果akshare也失败，返回空数据
-                    print(f"akshare基本面数据获取失败: {str(e)}")
+                    logger.warning(f"akshare基本面数据获取失败: {str(e)}")
                     fina_data = pd.DataFrame()
         except Exception as e:
-            print(f"掘金量化基本面数据获取失败: {str(e)}，回退到akshare")
+            logger.warning(f"掘金量化基本面数据获取失败: {str(e)}，回退到akshare")
             # 确保在基本面数据获取失败时，gm_symbol 仍然可用
             if "gm_symbol" not in locals() or "gm_symbol" not in globals():
                 gm_symbol = set_em_symble(ts_code)
             try:
-                symbol_clean = ts_code.split(".")[0]
+                symbol_clean = ts_code.split(".")[-1]
                 fina_data = ak.stock_financial_abstract(symbol=symbol_clean)
                 if isinstance(fina_data, pd.DataFrame) and fina_data.empty:
                     fina_data = pd.DataFrame()
@@ -505,7 +936,7 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         try:
             # 使用新版API获取历史数据
             daily = get_history_symbol(
-                symbols=gm_symbol,
+                symbol=gm_symbol,
                 start_date=(datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),
                 end_date=datetime.now().strftime("%Y-%m-%d"),
                 df=True,
@@ -515,19 +946,24 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
             if not isinstance(daily, pd.DataFrame) or daily.empty:
                 raise ValueError(f"掘金量化无{ts_code}技术面数据")
 
-            # 获取最新价格
-            current_data = current(symbols=gm_symbol, fields="price")
-            if isinstance(current_data, pd.DataFrame) and not current_data.empty:
-                current_price = current_data[0]["price"]
-            else:
-                # 如果实时价格获取失败，使用历史数据的最新收盘价
-                current_price = (
-                    daily["close"].iloc[-1]
-                    if not daily.empty
-                    and "close" in daily.columns
-                    and not daily["close"].isna().iloc[-1]
-                    else None
-                )
+            # 获取最新价格 - 优先使用实时数据，否则使用最近交易日收盘价
+            current_price = None
+            try:
+                current_data = current(symbols=gm_symbol)
+                if current_data and len(current_data) > 0:
+                    tick = current_data[0]
+                    current_price = tick.price if hasattr(tick, 'price') else (tick.get('price') if isinstance(tick, dict) else None)
+            except Exception as e:
+                logger.debug(f"实时价格获取失败，回退到历史数据: {e}")
+            
+            # 如果实时价格获取失败或为空，使用最近交易日的收盘价
+            if not current_price or (isinstance(current_price, float) and current_price <= 0):
+                if not daily.empty and "close" in daily.columns:
+                    # 获取最近的有效收盘价（非NaN）
+                    valid_closes = daily["close"].dropna()
+                    if not valid_closes.empty:
+                        current_price = valid_closes.iloc[-1]
+                        logger.debug(f"使用最近交易日收盘价: {current_price}")
 
         except:
             symbol_clean = ts_code.split(".")[1]
@@ -553,26 +989,18 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
                 )
 
                 # 获取最新的akshare数据作为当前价格
-                current_price = (
-                    daily["close"].iloc[-1]
-                    if not daily.empty
-                    and "close" in daily.columns
-                    and not daily["close"].isna().iloc[-1]
-                    else None
-                )
+                if not daily.empty and "close" in daily.columns:
+                    valid_closes = daily["close"].dropna()
+                    current_price = valid_closes.iloc[-1] if not valid_closes.empty else None
 
             except:
                 raise ValueError(f"技术面数据获取失败")
 
         # 确保技术数据包含当前价格
-        if "current_price" not in locals():
-            current_price = (
-                daily["close"].iloc[-1]
-                if not daily.empty
-                and "close" in daily.columns
-                and not daily["close"].isna().iloc[-1]
-                else None
-            )
+        if "current_price" not in locals() or not current_price:
+            if not daily.empty and "close" in daily.columns:
+                valid_closes = daily["close"].dropna()
+                current_price = valid_closes.iloc[-1] if not valid_closes.empty else None
 
         # 精简数据
         if limit_data and len(daily) > 5:
@@ -658,7 +1086,7 @@ def get_a_share_data(ts_code: Optional[str] = None, limit_data: bool = True) -> 
         except:
             # 如果掘金API失败，使用akshare获取
             try:
-                symbol_clean = ts_code.split(".")[0]
+                symbol_clean = ts_code.split(".")[-1]
                 stock_info = ak.stock_info_a_code_name()
                 # akshare返回的列名可能是index和name，需要调整
                 if (
@@ -748,7 +1176,7 @@ def financial_price_select(symbol_pool, last_day, max_liab_rate=50):
         bas = bas[bas["ast_liab_rate"] < max_liab_rate]
         return bas
     except Exception as e:
-        print(f"基本面筛选失败: {str(e)}")
+        logger.error(f"基本面筛选失败: {str(e)}")
         return pd.DataFrame()
 
 
@@ -1104,11 +1532,19 @@ def extract_stocks_from_result(result):
     import re
 
     selected_stocks = []
+    
+    # 处理CrewOutput对象
+    if hasattr(result, 'raw'):
+        result_text = result.raw
+    elif hasattr(result, 'result'):
+        result_text = str(result.result)
+    else:
+        result_text = str(result) if result else ""
 
     # 尝试从结果文本中提取股票信息
     # 匹配股票代码和名称的模式，例如: 600000 浦发银行 或 000001 平安银行
     stock_pattern = r"(\d{6})\s+([\u4e00-\u9fa5\w]+)"
-    matches = re.findall(stock_pattern, result)
+    matches = re.findall(stock_pattern, result_text)
 
     for match in matches:
         stock_code = match[0]
@@ -1120,14 +1556,14 @@ def extract_stocks_from_result(result):
 
         # 在匹配到股票代码和名称的上下文中查找价格信息
         # 寻找类似"买入价: xx元"或"目标价: xx元"的模式
-        context_start = max(0, result.find(f"{stock_code} {stock_name}") - 200)
+        context_start = max(0, result_text.find(f"{stock_code} {stock_name}") - 200)
         context_end = min(
-            len(result),
-            result.find(f"{stock_code} {stock_name}")
+            len(result_text),
+            result_text.find(f"{stock_code} {stock_name}")
             + len(f"{stock_code} {stock_name}")
             + 200,
         )
-        context = result[context_start:context_end]
+        context = result_text[context_start:context_end]
 
         # 匹配买入价格
         buy_patterns = [
@@ -1165,9 +1601,47 @@ def extract_stocks_from_result(result):
                 "sell_price": sell_price,
             }
         )
+    print(selected_stocks)
 
     return selected_stocks
 
+
+# ====================== 数据库模型定义 ======================
+
+class InvestmentReport(Base):
+    """
+    投资报告表
+    """
+
+    __tablename__ = "investment_reports"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    report_date = Column(Date, nullable=False, comment="报告日期")
+    report_content = Column(Text, nullable=False, comment="报告内容")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+    updated_at = Column(
+        DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
+    )
+
+
+class SelectedStock(Base):
+    """
+    选中股票表
+    """
+
+    __tablename__ = "selected_stocks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    report_date = Column(Date, nullable=False, comment="报告日期")
+    stock_code = Column(String(20), nullable=False, comment="股票代码")
+    stock_name = Column(String(100), nullable=False, comment="股票名称")
+    buy_price = Column(Float, comment="买入价格")
+    sell_price = Column(Float, comment="卖出价格")
+    buy_date = Column(Date, nullable=False, comment="买入日期")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+
+
+# ====================== 数据库操作函数 ======================
 
 def save_report_to_db(report_content, selected_stocks):
     """
@@ -1176,7 +1650,7 @@ def save_report_to_db(report_content, selected_stocks):
     try:
         engine = create_mysql_engine()
         if engine is None:
-            print("⚠️  数据库连接失败，跳过保存")
+            logger.warning("数据库连接失败，跳过保存")
             return
         Session = sessionmaker(bind=engine)
         session = Session()
@@ -1203,9 +1677,9 @@ def save_report_to_db(report_content, selected_stocks):
 
         session.commit()
         session.close()
-        print(f"✅ 投资报告和选中股票已保存到数据库，报告ID: {report_id}")
+        logger.info(f"投资报告和选中股票已保存到数据库，报告ID: {report_id}")
     except Exception as e:
-        print(f"❌ 保存到数据库失败: {str(e)}")
+        logger.error(f"保存到数据库失败: {str(e)}")
         import traceback
 
         traceback.print_exc()
@@ -1244,7 +1718,7 @@ if __name__ == "__main__":
             f.write(f"# {NEXT_TRADING_DAY} A股小盘股投资分析报告\n")
             f.write("---\n")
             f.write(
-                f"> **报告生成时间**: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"> **报告生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             )
             f.write(
                 "> **免责声明**: 本报告由AI智能体生成，仅供参考，不构成任何投资建议。投资有风险，入市需谨慎。\n"
@@ -1272,7 +1746,7 @@ if __name__ == "__main__":
             f.write("## 四、数据来源与工具\n")
             f.write("- 基本面/技术面数据：掘金量化、AkShare\n")
             f.write("- AI框架：CrewAI（多智能体协作）\n")
-            f.write("- LLM模型：DeepSeek Chat\n")
+            f.write("- LLM模型：Kimi2 (moonshot-v1-32k)\n")
             f.write("- 合规检查：内置监管规则引擎\n")
             f.write("- 原创性审核：基于网络文本相似度分析\n")
 
@@ -1284,111 +1758,20 @@ if __name__ == "__main__":
             # 这里需要从AI生成的结果中提取选中的股票信息
             # 由于AI生成的格式可能不固定，我们先尝试解析结果中的股票信息
             selected_stocks = extract_stocks_from_result(result)
-            save_report_to_db(result, selected_stocks)
+            # 将result转换为字符串
+            report_content = str(result) if result else ""
+            save_report_to_db(report_content, selected_stocks)
         except Exception as e:
-            print(f"❌ 数据库操作失败: {str(e)}")
+            logger.error(f"数据库操作失败: {str(e)}")
             import traceback
 
             traceback.print_exc()
 
     except (APITimeoutError, APIConnectionError) as e:
-        print(f"\n❌ 连接到DeepSeek API失败: {str(e)}")
-        print("请检查网络连接和API密钥配置")
+        logger.error(f"连接到Kimi API失败: {str(e)}")
+        logger.info("请检查网络连接和API密钥配置")
     except Exception as e:
-        print(f"\n❌ 程序执行出错: {str(e)}")
+        logger.error(f"程序执行出错: {str(e)}")
         import traceback
 
         traceback.print_exc()
-
-
-# 数据库配置
-def create_mysql_engine():
-    """
-    创建数据库引擎对象
-    """
-    # 从环境变量获取数据库配置，如果不存在则使用默认值
-    host = os.getenv("DB_HOST", "localhost")
-    user = os.getenv("DB_USER", "root")
-    passwd = os.getenv("DB_PASSWORD", "")
-    port = os.getenv("DB_PORT", "3306")
-    db = os.getenv("DB_NAME", "stock_base")
-
-    try:
-        # 创建连接数据库的引擎
-        db_engine = sqlalchemy.create_engine(
-            f"mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8",
-            poolclass=sqlalchemy.pool.NullPool,
-        )
-        # 测试连接
-        with db_engine.connect() as conn:
-            pass
-        return db_engine
-    except Exception as e:
-        print(f"❌ 数据库连接失败: {str(e)}")
-        # 尝试连接到服务器但不指定数据库，以检查是否可以创建数据库
-        try:
-            server_engine = sqlalchemy.create_engine(
-                f"mysql+pymysql://{user}:{passwd}@{host}:{port}",
-                poolclass=sqlalchemy.pool.NullPool,
-            )
-            with server_engine.connect() as conn:
-                conn.execute(
-                    sqlalchemy.text(
-                        f"CREATE DATABASE IF NOT EXISTS `{db}` CHARACTER SET utf8mb4"
-                    )
-                )
-            print(f"✅ 数据库 '{db}' 创建成功")
-        except Exception as create_error:
-            print(f"❌ 创建数据库失败: {str(create_error)}")
-            # 如果无法创建数据库，返回None表示连接失败
-            return None
-
-        # 再次尝试连接到数据库
-        try:
-            db_engine = sqlalchemy.create_engine(
-                f"mysql+pymysql://{user}:{passwd}@{host}:{port}/{db}?charset=utf8",
-                poolclass=sqlalchemy.pool.NullPool,
-            )
-            with db_engine.connect() as conn:
-                pass
-            return db_engine
-        except Exception as final_error:
-            print(f"❌ 最终数据库连接失败: {str(final_error)}")
-            return None
-
-
-# 创建ORM基类
-Base = declarative_base()
-
-
-class InvestmentReport(Base):
-    """
-    投资报告表
-    """
-
-    __tablename__ = "investment_reports"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    report_date = Column(Date, nullable=False, comment="报告日期")
-    report_content = Column(Text, nullable=False, comment="报告内容")
-    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
-    updated_at = Column(
-        DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间"
-    )
-
-
-class SelectedStock(Base):
-    """
-    选中股票表
-    """
-
-    __tablename__ = "selected_stocks"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    report_date = Column(Date, nullable=False, comment="报告日期")
-    stock_code = Column(String(20), nullable=False, comment="股票代码")
-    stock_name = Column(String(100), nullable=False, comment="股票名称")
-    buy_price = Column(Float, comment="买入价格")
-    sell_price = Column(Float, comment="卖出价格")
-    buy_date = Column(Date, nullable=False, comment="买入日期")
-    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
