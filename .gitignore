@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+
+# Cache
+cache/*.json
+cache/*.log
+!cache/.gitkeep
+
+# SQLite database
+data/*.db
+data/*.db-journal
+
+# Environment
+.env
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
